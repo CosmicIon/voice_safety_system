@@ -42,6 +42,7 @@ def get_timestamped_filename():
 def start_recording_loop(wf):
     print("[🔴 Recording started...] Say your safe phrase when safe.")
     recorded_frames = []
+
     while True:
         stream = audio_interface.open(format=FORMAT, channels=CHANNELS,
                                       rate=RATE, input=True, frames_per_buffer=CHUNK)
@@ -57,17 +58,20 @@ def start_recording_loop(wf):
 
         # Detect safe phrase
         try:
-            with sr.AudioData(data, RATE, 2) as chunk_audio:
-                text = recognizer.recognize_google(chunk_audio).lower()
-                print(f"[🗣️ Heard during recording]: {text}")
-                if SAFE_PHRASE in text:
-                    print("[✅ Safe phrase detected. Stopping recording.]")
-                    break
+            chunk_audio = sr.AudioData(data, RATE, 2)
+            text = recognizer.recognize_google(chunk_audio).lower()
+            print(f"[🗣️ Heard during recording]: {text}")
+            if SAFE_PHRASE in text:
+                print("[✅ Safe phrase detected. Stopping recording.]")
+                break
         except sr.UnknownValueError:
             pass
+        except sr.RequestError as e:
+            print(f"[❌ Speech recognition error]: {e}")
 
     save_audio(wf, recorded_frames)
     print(f"[💾 Audio saved to {wf}]")
+
 
 def main():
     print("[🚨 Safety Listener Activated] Listening for 30 seconds...")
