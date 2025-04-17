@@ -125,15 +125,18 @@ def main():
                     text = recognizer.recognize_google(audio).lower()
                     recent_words.append(text)
                     print(f"🔍 Heard: {text}")
-                    
+
                     if any(kw in text for kw in DISTRESS_KEYWORDS):
                         filename = f"distress_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav"
                         start_recording_loop(os.path.join(AUDIO_SAVE_DIR, filename))
                         return
-                        
+
                 except sr.UnknownValueError:
                     print("🔇 No speech understood")
-                
+
+                except sr.RequestError as e:
+                    print(f"❌ Recognition failed: {e}")
+
                 # Trigger recording if loud noise
                 if volume > VOLUME_THRESHOLD:
                     filename = f"noise_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav"
