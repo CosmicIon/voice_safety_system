@@ -2,121 +2,170 @@ import speech_recognition as sr
 import pyaudio
 import wave
 import time
-from datetime import datetime
 import os
-from utils.audio_tools import calculate_volume, save_audio
+import numpy as np
+from datetime import datetime
+import matplotlib.pyplot as plt
 
 # ====== CONFIGURATION ======
-LISTEN_DURATION = 30  # seconds
-CHUNK = 1024
+LISTEN_DURATION = 30
+CHUNK = 2048  # Increased chunk size for better audio handling
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-VOLUME_THRESHOLD = 1000  # Adjust this based on environment
+VOLUME_THRESHOLD = 1000
 DISTRESS_KEYWORDS = ["help", "please help me", "bachao", "choro"]
-SAFE_PHRASE = "i am safe"
+SAFE_PHRASE = "safe"
 AUDIO_SAVE_DIR = "audio_logs"
+PLOT_UPDATE_INTERVAL = 20  # Update plot every 20 chunks to reduce lag
 
 # ====== INITIALIZE ======
 recognizer = sr.Recognizer()
 audio_interface = pyaudio.PyAudio()
 
-def listen_for_speech(timeout=3):
-    """Listen to mic for a short time and return audio data."""
+# Matplotlib setup
+plt.switch_backend('TkAgg')
+fig, (ax1, ax2) = plt.subplots(2, 1)
+vol_buffer = np.zeros(100)  # Buffer for smoother volume display
+timestamps = np.linspace(0, 5, 100)  # 5-second window
+recent_words = []
+
+def update_plot():
+    """Optimized plot update with buffer"""
+    try:
+        ax1.clear()
+        ax1.plot(timestamps, vol_buffer, 'r-')
+        ax1.axhline(y=VOLUME_THRESHOLD, color='g', linestyle='--')
+        ax1.set_ylabel('Volume (RMS)')
+        ax1.set_ylim(0, 5000)
+        
+        ax2.clear()
+        display_text = "Last Detected Words:\n" + "\n".join(recent_words[-3:])
+        ax2.text(0.1, 0.5, display_text, fontsize=10, va='center')
+        ax2.axis('off')
+        
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.01)
+    except Exception as e:
+        print(f"Plot error: {str(e)}")
+
+def calculate_volume(audio_data):
+    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+    return np.sqrt(np.mean(np.square(audio_array))) if len(audio_array) > 0 else 0
+
+def save_audio(filename, frames):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    print(f"\n💾 Saving {filename}...")
+    with wave.open(filename, 'wb') as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)
+        wf.setframerate(RATE)
+        wf.writeframes(b''.join(frames))
+    print(f"✅ Saved {filename} (Length: {len(frames)*CHUNK/RATE:.1f}s)")
+
+def listen_for_speech(timeout=2):
     with sr.Microphone(sample_rate=RATE) as source:
         try:
-            audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=timeout)
-            return audio
+            return recognizer.listen(source, timeout=timeout, 
+                                   phrase_time_limit=timeout)
         except sr.WaitTimeoutError:
             return None
 
-def detect_keywords(text, keywords):
-    """Check if any keyword is in the text."""
-    text = text.lower()
-    return any(kw in text for kw in keywords)
-
-def get_timestamped_filename():
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    return f"{AUDIO_SAVE_DIR}/distress_{timestamp}.wav"
-
-def start_recording_loop(wf):
-    print("[🔴 Recording started...] Say your safe phrase when safe.")
-    recorded_frames = []
-
-    while True:
-        stream = audio_interface.open(format=FORMAT, channels=CHANNELS,
-                                      rate=RATE, input=True, frames_per_buffer=CHUNK)
+def detect_safe_phrase(stream):
+    """Improved safe phrase detection with audio buffer"""
+    buffer = []
+    start_time = time.time()
+    
+    while time.time() - start_time < 10:  # Max 10s recording
         data = stream.read(CHUNK)
-        recorded_frames.append(data)
+        buffer.append(data)
+        
+        # Update volume buffer
+        vol = calculate_volume(data)
+        vol_buffer[:-1] = vol_buffer[1:]
+        vol_buffer[-1] = vol
+        
+        # Update plot periodically
+        if len(buffer) % PLOT_UPDATE_INTERVAL == 0:
+            update_plot()
+            print(f"📊 Real-time Volume: {vol:.1f}", end='\r')
+            
+        # Check safe phrase every 2 chunks (≈0.25s at 2048 chunk size)
+        if len(buffer) % 2 == 0:
+            try:
+                audio_chunk = b''.join(buffer[-2:])  # Combine last 2 chunks
+                audio_data = sr.AudioData(audio_chunk, RATE, 2)
+                text = recognizer.recognize_google(audio_data).lower()
+                recent_words.append(text)
+                
+                if SAFE_PHRASE in text:
+                    print(f"\n✅ SAFE PHRASE DETECTED: '{text}'")
+                    return True, buffer
+                    
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                print(f"\n⚠️ Recognition error: {str(e)}")
+                
+    return False, buffer
+
+def start_recording_loop(filename):
+    print("\n🔴 RECORDING STARTED... Say 'safe' to stop")
+    stream = audio_interface.open(format=FORMAT, channels=CHANNELS,
+                                rate=RATE, input=True, 
+                                frames_per_buffer=CHUNK)
+    try:
+        safe_detected, buffer = detect_safe_phrase(stream)
+        save_audio(filename, buffer)
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Recording interrupted")
+    finally:
         stream.stop_stream()
         stream.close()
-
-        # Detect loudness
-        volume = calculate_volume(data)
-        if volume > VOLUME_THRESHOLD:
-            print(f"[‼️ Loud sound detected during recording] Volume: {volume}")
-
-        # Detect safe phrase
-        try:
-            chunk_audio = sr.AudioData(data, RATE, 2)
-            text = recognizer.recognize_google(chunk_audio).lower()
-            print(f"[🗣️ Heard during recording]: {text}")
-            if SAFE_PHRASE in text:
-                print("[✅ Safe phrase detected. Stopping recording.]")
-                break
-        except sr.UnknownValueError:
-            pass
-        except sr.RequestError as e:
-            print(f"[❌ Speech recognition error]: {e}")
-
-    save_audio(wf, recorded_frames)
-    print(f"[💾 Audio saved to {wf}]")
-
+        plt.close()
 
 def main():
-    print("[🚨 Safety Listener Activated] Listening for 30 seconds...")
-
-    start_time = time.time()
-    heard_something = False
-
-    while time.time() - start_time < LISTEN_DURATION:
-        audio = listen_for_speech(timeout=3)
-
-        if audio is None:
-            continue
-
-        heard_something = True
-
-        # Convert audio to text
-        try:
-            text = recognizer.recognize_google(audio)
-            print(f"[🗣️ Heard]: {text}")
-            if detect_keywords(text, DISTRESS_KEYWORDS):
-                print("[‼️ Distress keyword detected]")
-                output = 1
-                print(f"Output: {output}")
-                filename = get_timestamped_filename()
-                start_recording_loop(filename)
-                return
-        except sr.UnknownValueError:
-            pass
-
-        # Also check for loud noises
-        audio_data = audio.get_raw_data()
-        volume = calculate_volume(audio_data)
-        if volume > VOLUME_THRESHOLD:
-            print(f"[‼️ Loud noise detected] Volume: {volume}")
-            output = 1
-            print(f"Output: {output}")
-            filename = get_timestamped_filename()
-            start_recording_loop(filename)
-            return
-
-    # After 30 seconds
-    output = 0
-    print("[🕒 30 seconds complete.]")
-    print(f"Output: {output}")
+    print("🚀 Safety System Activated")
+    os.makedirs(AUDIO_SAVE_DIR, exist_ok=True)
+    
+    try:
+        start_time = time.time()
+        while time.time() - start_time < LISTEN_DURATION:
+            audio = listen_for_speech()
+            
+            if audio:
+                # Volume check
+                volume = calculate_volume(audio.get_raw_data())
+                print(f"📢 Initial Volume: {volume}")
+                
+                # Speech recognition
+                try:
+                    text = recognizer.recognize_google(audio).lower()
+                    recent_words.append(text)
+                    print(f"🔍 Heard: {text}")
+                    
+                    if any(kw in text for kw in DISTRESS_KEYWORDS):
+                        filename = f"distress_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+                        start_recording_loop(os.path.join(AUDIO_SAVE_DIR, filename))
+                        return
+                        
+                except sr.UnknownValueError:
+                    print("🔇 No speech understood")
+                
+                # Trigger recording if loud noise
+                if volume > VOLUME_THRESHOLD:
+                    filename = f"noise_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wav"
+                    start_recording_loop(os.path.join(AUDIO_SAVE_DIR, filename))
+                    return
+                    
+        print("\n🕒 Monitoring period ended - No threats detected")
+        
+    except KeyboardInterrupt:
+        print("\n🛑 System stopped by user")
+    finally:
+        audio_interface.terminate()
 
 if __name__ == "__main__":
-    os.makedirs(AUDIO_SAVE_DIR, exist_ok=True)
     main()
