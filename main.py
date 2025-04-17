@@ -51,8 +51,11 @@ def update_plot():
         print(f"Plot error: {str(e)}")
 
 def calculate_volume(audio_data):
-    audio_array = np.frombuffer(audio_data, dtype=np.int16)
-    return np.sqrt(np.mean(np.square(audio_array))) if len(audio_array) > 0 else 0
+    audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+    if len(audio_array) == 0:
+        return 0
+    return np.sqrt(np.mean(np.square(audio_array)))
+
 
 def save_audio(filename, frames):
     os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -72,59 +75,36 @@ def listen_for_speech(timeout=2):
         except sr.WaitTimeoutError:
             return None
 
-def detect_safe_phrase(stream):
-    """Improved safe phrase detection with audio buffer"""
-    buffer = []
-    start_time = time.time()
-    
-    while time.time() - start_time < 10:  # Max 10s recording
-        data = stream.read(CHUNK)
-        buffer.append(data)
-        
-        # Update volume buffer
-        vol = calculate_volume(data)
-        vol_buffer[:-1] = vol_buffer[1:]
-        vol_buffer[-1] = vol
-        
-        # Update plot periodically
-        if len(buffer) % PLOT_UPDATE_INTERVAL == 0:
-            update_plot()
-            print(f"📊 Real-time Volume: {vol:.1f}", end='\r')
-            
-        # Check safe phrase every 2 chunks (≈0.25s at 2048 chunk size)
-        if len(buffer) % 2 == 0:
-            try:
-                audio_chunk = b''.join(buffer[-2:])  # Combine last 2 chunks
-                audio_data = sr.AudioData(audio_chunk, RATE, 2)
-                text = recognizer.recognize_google(audio_data).lower()
-                recent_words.append(text)
-                
-                if SAFE_PHRASE in text:
-                    print(f"\n✅ SAFE PHRASE DETECTED: '{text}'")
-                    return True, buffer
-                    
-            except sr.UnknownValueError:
-                pass
-            except Exception as e:
-                print(f"\n⚠️ Recognition error: {str(e)}")
-                
-    return False, buffer
-
 def start_recording_loop(filename):
-    print("\n🔴 RECORDING STARTED... Say 'safe' to stop")
+    print("\n🔴 RECORDING STARTED... Press Ctrl+C to stop recording manually.")
     stream = audio_interface.open(format=FORMAT, channels=CHANNELS,
-                                rate=RATE, input=True, 
-                                frames_per_buffer=CHUNK)
+                                  rate=RATE, input=True, 
+                                  frames_per_buffer=CHUNK)
+
+    frames = []
     try:
-        safe_detected, buffer = detect_safe_phrase(stream)
-        save_audio(filename, buffer)
-        
+        while True:
+            data = stream.read(CHUNK)
+            frames.append(data)
+
+            # Volume monitoring + plotting (optional)
+            vol = calculate_volume(data)
+            vol_buffer[:-1] = vol_buffer[1:]
+            vol_buffer[-1] = vol
+
+            if len(frames) % PLOT_UPDATE_INTERVAL == 0:
+                update_plot()
+                print(f"📊 Real-time Volume: {vol:.1f}", end='\r')
+
     except KeyboardInterrupt:
-        print("\n🛑 Recording interrupted")
+        print("\n🛑 Manual stop detected. Saving audio...")
+
     finally:
         stream.stop_stream()
         stream.close()
         plt.close()
+        save_audio(filename, frames)
+
 
 def main():
     print("🚀 Safety System Activated")
